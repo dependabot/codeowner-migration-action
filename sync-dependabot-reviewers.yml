@@ -1,0 +1,350 @@
+name: Migrate Dependabot Reviewers to CODEOWNERS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-reviewers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync reviewers to CODEOWNERS
+        id: sync
+        run: |
+          python3 << 'EOF'
+          import os
+          import yaml
+          import sys
+
+          def get_manifest_files_for_ecosystem(ecosystem, directory):
+              """
+              Get manifest file patterns for each package ecosystem.
+              Handles both specific files and glob patterns correctly for CODEOWNERS.
+              """
+              # Mapping of ecosystems to their manifest files https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference#package-ecosystem-
+              ecosystem_manifests = {
+                  'bundler': ['Gemfile', 'Gemfile.lock', '*.gemspec'],
+                  'bun': ['package.json', 'bun.lockb'],
+                  'npm': ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml'],
+                  'cargo': ['Cargo.toml', 'Cargo.lock'],
+                  'composer': ['composer.json', 'composer.lock'],
+                  'devcontainers': ['.devcontainer/devcontainer.json', '.devcontainer.json'],
+                  'docker': ['Dockerfile', 'Dockerfile.*', '*.dockerfile'],
+                  'docker-compose': ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'],
+                  'dotnet-sdk': ['*.csproj', '*.fsproj', '*.vbproj', '*.sln', 'packages.config', 'global.json'],
+                  'nuget': ['*.csproj', '*.fsproj', '*.vbproj', '*.sln', 'packages.config', 'Directory.Build.props', 'Directory.Packages.props'],
+                  'elm': ['elm.json'],
+                  'github-actions': ['.github/workflows/*.yml', '.github/workflows/*.yaml', 'action.yml', 'action.yaml'],
+                  'gitsubmodule': ['.gitmodules'],
+                  'gomod': ['go.mod', 'go.sum'],
+                  'gradle': ['build.gradle', 'build.gradle.kts', 'gradle.properties', 'settings.gradle', 'settings.gradle.kts'],
+                  'maven': ['pom.xml', '*.pom'],
+                  'helm': ['Chart.yaml', 'Chart.yml', 'values.yaml', 'values.yml'],
+                  'mix': ['mix.exs', 'mix.lock'],
+                  'pip': ['requirements.txt', 'requirements/*.txt', 'setup.py', 'setup.cfg', 'pyproject.toml', 'Pipfile', 'Pipfile.lock'],
+                  'uv': ['pyproject.toml', 'uv.lock'],
+                  'pub': ['pubspec.yaml', 'pubspec.yml', 'pubspec.lock'],
+                  'swift': ['Package.swift', 'Package.resolved'],
+                  'terraform': ['*.tf', '*.tfvars', '*.hcl']
+              }
+              
+              directory = directory.strip()
+              if not directory.startswith('/'):
+                  directory = '/' + directory
+              
+              # Normalize directory path - remove trailing slash and handle root
+              if directory == '/':
+                  directory = ''
+              else:
+                  directory = directory.rstrip('/')
+              
+              manifest_files = ecosystem_manifests.get(ecosystem, [])
+              patterns = []
+              
+              for manifest in manifest_files:
+                  # Handle different pattern types for CODEOWNERS
+                  if directory:
+                      if directory == '/':
+                          # Root directory patterns
+                          if '*' in manifest or '?' in manifest:
+                              # Glob pattern - ensure it matches files in root and subdirectories
+                              pattern = f"/{manifest}"
+                              if not manifest.startswith('**/'):
+                                  patterns.append(f"/**/{manifest}")  # Recursive pattern
+                              patterns.append(pattern)
+                          else:
+                              # Specific file
+                              pattern = f"/{manifest}"
+                              patterns.append(pattern)
+                      else:
+                          # Specific directory patterns
+                          if '*' in manifest or '?' in manifest:
+                              pattern = f"{directory}/{manifest}"
+                              patterns.append(pattern)
+                              if not manifest.startswith('**/'):
+                                  patterns.append(f"{directory}/**/{manifest}")
+                          else:
+                              pattern = f"{directory}/{manifest}"
+                              patterns.append(pattern)
+                  else:
+                      # Root directory case
+                      if '*' in manifest or '?' in manifest:
+                          # Glob pattern
+                          pattern = f"/{manifest}"
+                          patterns.append(pattern)
+                          if not manifest.startswith('**/'):
+                              patterns.append(f"/**/{manifest}")
+                      else:
+                          pattern = f"/{manifest}"
+                          patterns.append(pattern)
+              
+              seen = set()
+              unique_patterns = []
+              for pattern in patterns:
+                  if pattern not in seen:
+                      seen.add(pattern)
+                      unique_patterns.append(pattern)
+              
+              return unique_patterns
+          def main():
+              try:
+                  file_path = '.github/dependabot.yml'
+                  if not os.path.exists(file_path):
+                      print('dependabot.yml file not found!')
+                      return False
+
+                  with open(file_path, 'r') as f:
+                      dependabot_config = yaml.safe_load(f)
+
+                  directory_reviewers = []
+                  if 'updates' in dependabot_config:
+                      for update in dependabot_config['updates']:
+                          if 'reviewers' in update and 'package-ecosystem' in update:
+                              ecosystem = update['package-ecosystem']
+                              directories = []
+                              if 'directory' in update:
+                                  directories = [update['directory']]
+                              elif 'directories' in update:
+                                  directories = update['directories']
+                              
+                              for directory in directories:
+                                  manifest_patterns = get_manifest_files_for_ecosystem(ecosystem, directory)
+                                  
+                                  dir_reviewers = []
+                                  for reviewer in update['reviewers']:
+
+                                      if isinstance(reviewer, str):
+                                          dir_reviewers.append(reviewer)
+                                      elif isinstance(reviewer, dict) and 'username' in reviewer:
+                                          dir_reviewers.append(reviewer['username'])
+                                  
+                                  if dir_reviewers and manifest_patterns:
+                                      print(f'Processing ecosystem: {ecosystem}, directory: {directory}, manifest files: {manifest_patterns}')
+                                      for pattern in manifest_patterns:
+                                          directory_reviewers.append({
+                                              'directory': pattern,
+                                              'reviewers': dir_reviewers
+                                          })
+
+                  if len(directory_reviewers) == 0:
+                      print('No reviewers found for any supported package ecosystems in dependabot.yml!')
+                      return False
+
+                  print(f'Directory reviewers list: {directory_reviewers}')
+
+                  # Check for CODEOWNERS file in all possible locations
+                  possible_codeowners_paths = [
+                      'CODEOWNERS',           # Root directory
+                      '.github/CODEOWNERS',   # .github/ directory
+                      'docs/CODEOWNERS'       # docs/ directory
+                  ]
+                  
+                  codeowners_file_path = None
+                  codeowners_content = ''
+                  has_changes = False
+                  
+                  # Find existing CODEOWNERS file
+                  for path in possible_codeowners_paths:
+                      if os.path.exists(path):
+                          codeowners_file_path = path
+                          with open(path, 'r') as f:
+                              codeowners_content = f.read()
+                          print(f'Found existing CODEOWNERS file at: {path}')
+                          break
+                  
+                  # If no CODEOWNERS file exists, use the root directory as default
+                  if codeowners_file_path is None:
+                      codeowners_file_path = 'CODEOWNERS'
+                      print(f'No existing CODEOWNERS file found, will create at: {codeowners_file_path}')
+
+                  # We need this to ensure the section is added correctly for new as well as existing
+                  dependabot_section = '# Dependabot reviewers (migrated from .github/dependabot.yml)'
+                  
+                  new_reviewers_lines = []
+                  for dir_config in directory_reviewers:
+                      manifest_pattern = dir_config['directory']
+                      reviewers = dir_config['reviewers']
+                      
+                      formatted_reviewers = []
+                      for reviewer in reviewers:
+                          formatted_reviewer = reviewer if reviewer.startswith('@') else '@' + reviewer
+                          formatted_reviewers.append(formatted_reviewer)
+                      
+                      line = f"{manifest_pattern} {' '.join(formatted_reviewers)}"
+                      new_reviewers_lines.append(line)
+                  
+                  def sort_codeowners_lines(line):
+                      """
+                      Sort CODEOWNERS lines for proper precedence.
+                      - Specific files before glob patterns
+                      - Root patterns before nested patterns
+                      - Shorter paths before longer paths
+                      """
+
+                      parts = line.strip().split()
+                      if not parts:
+                          return (999, line)
+                      
+                      pattern = parts[0]
+                      
+                      wildcard_count = pattern.count('*') + pattern.count('?')
+                      
+                      path_depth = pattern.count('/')
+                      
+                      has_extension = '.' in pattern.split('/')[-1] if '/' in pattern else '.' in pattern
+                      
+                      is_root_pattern = pattern.startswith('/*') and not pattern.startswith('/**')
+                      
+                      return (
+                          0 if is_root_pattern else 1,  
+                          wildcard_count,
+                          0 if has_extension else 1,
+                          path_depth,
+                          pattern
+                      )
+                  
+                  new_reviewers_lines.sort(key=sort_codeowners_lines)
+                  
+                  lines = codeowners_content.split('\n')
+                  dependabot_section_index = -1
+                  
+                  for i, line in enumerate(lines):
+                      if '# Dependabot reviewers' in line:
+                          dependabot_section_index = i
+                          break
+                  
+                  if dependabot_section_index >= 0:
+                      # Update existing section
+                      next_section_index = -1
+                      for i in range(dependabot_section_index + 1, len(lines)):
+                          if lines[i].startswith('#') and '# Dependabot reviewers' not in lines[i]:
+                              next_section_index = i
+                              break
+                      
+                      end_index = next_section_index if next_section_index >= 0 else len(lines)
+                      
+                      current_reviewers_lines = []
+                      for i in range(dependabot_section_index + 1, end_index):
+                          if i < len(lines):
+                              line = lines[i].strip()
+                              if (line.startswith('/') and '@' in line) or line.startswith('* @'):
+                                  current_reviewers_lines.append(lines[i])
+                      
+                      # Check if reviewers need updating
+                      if current_reviewers_lines != new_reviewers_lines:
+                          for i in range(end_index - 1, dependabot_section_index, -1):
+                              if i < len(lines):
+                                  line = lines[i].strip()
+
+                                  if (line.startswith('/') and '@' in line) or line.startswith('* @'):
+                                      lines.pop(i)
+                          
+                          for i, line in enumerate(new_reviewers_lines):
+                              lines.insert(dependabot_section_index + 1 + i, line)
+                          
+                          has_changes = True
+                  else:
+                      if codeowners_content.strip() != '':
+                          lines.append('')
+                      lines.append(dependabot_section)
+                      for line in new_reviewers_lines:
+                          lines.append(line)
+                      has_changes = True
+
+                  if has_changes:
+                      # Ensure the directory exists for the CODEOWNERS file
+                      codeowners_dir = os.path.dirname(codeowners_file_path)
+                      if codeowners_dir and not os.path.exists(codeowners_dir):
+                          os.makedirs(codeowners_dir, exist_ok=True)
+                          print(f'Created directory: {codeowners_dir}')
+                      
+                      new_content = '\n'.join(lines)
+                      if not new_content.endswith('\n'):
+                          new_content += '\n'
+                      with open(codeowners_file_path, 'w') as f:
+                          f.write(new_content)
+                      print(f'CODEOWNERS file updated at: {codeowners_file_path}')
+                      return True
+                  else:
+                      print('No changes were made to CODEOWNERS file')
+                      return False
+
+              except Exception as error:
+                  print(f'Error: {error}')
+                  import traceback
+                  traceback.print_exc()
+                  sys.exit(1)
+
+          if main():
+              print('has_changes=true')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('has_changes=true\n')
+              
+              # Output the CODEOWNERS file path for the PR body
+              possible_paths = ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS']
+              used_path = 'CODEOWNERS'  # default
+              for path in possible_paths:
+                  if os.path.exists(path):
+                      used_path = path
+                      break
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f'codeowners_path={used_path}\n')
+          else:
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('has_changes=false\n')
+          EOF
+
+      - name: Create Pull Request
+        if: steps.sync.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'migrate dependabot reviewers to CODEOWNERS'
+          title: 'Migrate Dependabot Reviewers to CODEOWNERS'
+          body: |
+            This PR automatically migrates the reviewers from `.github/dependabot.yml` to the `CODEOWNERS` file.
+
+            - Updated `${{ steps.sync.outputs.codeowners_path || 'CODEOWNERS' }}` file with `reviewers` from `dependabot.yml` file configuration
+
+            ---
+            *Created automatically by the `migrate-dependabot-reviewers` workflow.*
+          branch: migrate-dependabot-reviewers
+          delete-branch: true
+          draft: false
+
+      - name: Output results
+        run: |
+          if [ "${{ steps.sync.outputs.has_changes }}" = "true" ]; then
+            CODEOWNERS_PATH="${{ steps.sync.outputs.codeowners_path || 'CODEOWNERS' }}"
+            echo "CODEOWNERS file has been updated at: $CODEOWNERS_PATH and PR created"
+          else
+            echo "No changes needed - CODEOWNERS is already up to date"
+          fi
