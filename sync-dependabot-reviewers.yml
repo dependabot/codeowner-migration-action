@@ -332,7 +332,7 @@ jobs:
           body: |
             This PR automatically migrates the reviewers from `.github/dependabot.yml` to the `CODEOWNERS` file.
 
-            - Updated `${{ steps.sync.outputs.codeowners_path || 'CODEOWNERS' }}` file with `reviewers` from `dependabot.yml` file configuration
+            - Updated `${{ steps.sync.outputs.codeowners_path || 'CODEOWNERS' }}` file with `reviewers` from `dependabot.yml` file configuration.
 
             ---
             *Created automatically by the `migrate-dependabot-reviewers` workflow.*
